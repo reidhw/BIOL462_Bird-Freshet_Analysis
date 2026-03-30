@@ -4,7 +4,7 @@ library(stringr)
 library(patchwork)
 
 # --- Load & clean ---
-df_biomass <- read.csv("gbif_with_monthly_discharge_updated.csv")
+df_biomass <- read.csv("gbif_with_freshet_updated.csv")
 
 data("known_species")
 known_species <- known_species %>%
@@ -21,12 +21,9 @@ df_biomass <- df_biomass %>% filter(species %in% valid_species)
 
 # --- Abundance per species per year+month ---
 annual_species_abundance <- df_biomass %>%
-  group_by(year, month, species) %>%          
-  summarise(
-    abundance = n(),
-    .groups = "drop"
-  ) %>%
-  left_join(                                  
+  group_by(year, month, species) %>%
+  summarise(abundance = n(), .groups = "drop") %>%
+  left_join(
     df_biomass %>%
       group_by(year, month) %>%
       summarise(
@@ -38,19 +35,14 @@ annual_species_abundance <- df_biomass %>%
 
 # --- Biomass simulation ---
 annual_biomass <- annual_species_abundance %>%
-  group_split(year, month) %>%                 
+  group_split(year, month) %>%
   map_df(function(month_df) {
-    
     comm <- month_df %>%
-      select(abundance, scientific_name = species)
-    
-    sims <- community_generate(
-      comm,
-      abundance_column_name = "abundance"
-    )
-    
+      rename(scientific_name = species) %>%
+      dplyr::select(scientific_name, abundance)
+    sims <- community_generate(comm, abundance_column_name = "abundance")
     tibble(
-      year              = unique(month_df$year),   
+      year              = unique(month_df$year),
       month             = unique(month_df$month),
       freshet_magnitude = unique(month_df$freshet_magnitude),
       total_abundance   = sum(month_df$abundance),
@@ -58,41 +50,31 @@ annual_biomass <- annual_species_abundance %>%
     )
   })
 
-# Aerial insectivores are typically present May-September in BC
 annual_biomass_season <- annual_biomass %>%
-  filter(month %in% c(4, 5, 6, 7, 8, 9))  # adjust as needed
+  filter(month %in% c(4, 5, 6, 7, 8, 9))
 
 model_biomass <- lm(log(total_biomass_g) ~ log(freshet_magnitude),
                     data = annual_biomass_season)
 
 summary(model_biomass)
-
-# --- Residual check ---
-qqnorm(resid(model_biomass))
-qqline(resid(model_biomass))
-
+qqnorm(resid(model_biomass)); qqline(resid(model_biomass))
 shapiro.test(resid(model_biomass))
-# p > 0.05 means you can't reject normality — acceptable for regression
 
-# --- Plot ---
-# --- Annotation values pulled from model ---
-r2 <- round(summary(model_biomass)$r.squared, 3)
-pval <- formatC(summary(model_biomass)$coefficients[2, 4], format = "e", digits = 2)
+# --- Annotation ---
+r2    <- round(summary(model_biomass)$r.squared, 3)
+pval  <- formatC(summary(model_biomass)$coefficients[2, 4], format = "e", digits = 2)
 annotation <- paste0("R² = ", r2, "\np = ", pval)
 
-# --- Shared colour scale by year ---
 year_colors <- scale_color_brewer(palette = "Dark2", name = "Year")
 
-# --- Plot 1: Log-log scale ---
+# --- Plot 1: Log-log ---
 p1 <- ggplot(annual_biomass_season,
              aes(x = log(freshet_magnitude),
                  y = log(total_biomass_g),
-                 color = factor(year),
-                 label = month)) +
+                 color = factor(year))) +
   geom_smooth(method = "lm", se = TRUE,
               color = "grey40", fill = "grey85", linewidth = 0.8) +
   geom_point(size = 3) +
-  geom_text(nudge_y = 0.12, size = 3, show.legend = FALSE) +
   annotate("text", x = -Inf, y = Inf,
            hjust = -0.1, vjust = 1.4,
            label = annotation, size = 3.5) +
@@ -105,23 +87,16 @@ p1 <- ggplot(annual_biomass_season,
   theme_classic() +
   theme(legend.position = "none")
 
-# --- Plot 2: Back-transformed raw scale ---
-# Generate prediction ribbon on log scale then back-transform
+# --- Plot 2: Raw scale ---
 pred_data <- data.frame(
   freshet_magnitude = seq(min(annual_biomass_season$freshet_magnitude),
                           max(annual_biomass_season$freshet_magnitude),
                           length.out = 200)
-)
-pred_out <- predict(model_biomass,
-                    newdata = pred_data %>%
-                      mutate(freshet_magnitude = freshet_magnitude),
-                    interval = "confidence")
-
-pred_data <- pred_data %>%
+) %>%
   mutate(
-    fit   = exp(pred_out[, "fit"]),
-    lower = exp(pred_out[, "lwr"]),
-    upper = exp(pred_out[, "upr"])
+    fit   = exp(predict(model_biomass, newdata = ., interval = "confidence")[, "fit"]),
+    lower = exp(predict(model_biomass, newdata = ., interval = "confidence")[, "lwr"]),
+    upper = exp(predict(model_biomass, newdata = ., interval = "confidence")[, "upr"])
   )
 
 p2 <- ggplot() +
@@ -134,16 +109,8 @@ p2 <- ggplot() +
   geom_point(data = annual_biomass_season,
              aes(x = freshet_magnitude,
                  y = total_biomass_g,
-                 color = factor(year),
-                 label = month),
+                 color = factor(year)),
              size = 3) +
-  geom_text(data = annual_biomass_season,
-            aes(x = freshet_magnitude,
-                y = total_biomass_g,
-                label = month,
-                color = factor(year)),
-            nudge_y = max(annual_biomass_season$total_biomass_g) * 0.03,
-            size = 3, show.legend = FALSE) +
   annotate("text", x = -Inf, y = Inf,
            hjust = -0.1, vjust = 1.4,
            label = annotation, size = 3.5) +
@@ -156,17 +123,15 @@ p2 <- ggplot() +
   theme_classic() +
   theme(legend.position = "right")
 
-# --- Combine side by side ---
+# --- Combine ---
 p1 + p2 +
   plot_annotation(
-    title = "Aerial Insectivore Biomass vs. Fraser River Freshet Magnitude",
+    title    = "Aerial Insectivore Biomass vs. Fraser River Freshet Magnitude",
     subtitle = "Breeding season (Apr–Sep), 2018–2023",
     theme = theme(
-      plot.title = element_text(face = "bold", size = 13),
+      plot.title    = element_text(face = "bold", size = 13),
       plot.subtitle = element_text(size = 10, color = "grey40")
     )
   )
 
-# --- Save ---
 ggsave("freshet_biomass_plot.png", width = 12, height = 5.5, dpi = 300)
-
